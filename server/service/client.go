@@ -497,25 +497,6 @@ func (c *Client) ApplyGroup(
 				}
 			}
 		}
-		if scripts := extractAppCfgScripts(specs.AppConfig); scripts != nil {
-			files := resolveApplyRelativePaths(baseDir, scripts)
-			scriptPayloads := make([]fleet.ScriptPayload, len(files))
-			for i, f := range files {
-				b, err := os.ReadFile(f)
-				if err != nil {
-					return nil, nil, nil, fmt.Errorf("applying fleet config: %w", err)
-				}
-				scriptPayloads[i] = fleet.ScriptPayload{
-					ScriptContents: b,
-					Name:           filepath.Base(f),
-				}
-			}
-			noTeamScripts, err := c.ApplyNoTeamScripts(scriptPayloads, opts.ApplySpecOptions)
-			if err != nil {
-				return nil, nil, nil, fmt.Errorf("applying no-team scripts: %w", err)
-			}
-			teamScripts["No team"] = noTeamScripts
-		}
 		if err := c.ApplyAppConfig(specs.AppConfig, opts.ApplySpecOptions); err != nil {
 			return nil, nil, nil, fmt.Errorf("applying fleet config: %w", err)
 		}
@@ -1500,7 +1481,18 @@ func (c *Client) DoGitOps(
 				return nil, err
 			}
 			teamSoftwareInstallers = noTeamSoftwareInstallers
-			teamScripts = teamsScripts["No team"]
+		}
+	}
+
+	// we need to upload scripts for all editions of Fleet, but only premium can apply script policy automation
+	if (config.TeamName == nil && (appConfig == nil || !appConfig.License.IsPremium())) ||
+		(config.TeamName != nil && config.IsNoTeam()) {
+		noTeamScripts, err := c.doGitOpsNoTeamScripts(config, baseDir, appConfig, logFn, dryRun)
+		if err != nil {
+			return nil, err
+		}
+		if appConfig != nil && appConfig.License.IsPremium() {
+			teamScripts = noTeamScripts
 		}
 	}
 
@@ -1519,6 +1511,33 @@ func (c *Client) DoGitOps(
 	}
 
 	return teamAssumptions, nil
+}
+
+func (c *Client) doGitOpsNoTeamScripts(config *spec.GitOps, baseDir string, appconfig *fleet.EnrichedAppConfig, logFn func(format string, args ...interface{}), dryRun bool) ([]fleet.ScriptResponse, error) {
+	scriptPayloads := make([]fleet.ScriptPayload, len(config.Controls.Scripts))
+	for i, script := range config.Controls.Scripts {
+		b, err := os.ReadFile(*script.Path)
+		if err != nil {
+			return nil, fmt.Errorf(`applying no-team scripts: %w`, err)
+		}
+		scriptPayloads[i] = fleet.ScriptPayload{
+			ScriptContents: b,
+			Name:           filepath.Base(*script.Path),
+		}
+	}
+	logFn("[+] applying %d no-team scripts\n", len(scriptPayloads))
+	noTeamScripts, err := c.ApplyNoTeamScripts(scriptPayloads, fleet.ApplySpecOptions{DryRun: dryRun})
+	if err != nil {
+		return nil, fmt.Errorf(`applying no-team scripts: %w`, err)
+	}
+
+	if dryRun {
+		logFn("[+] would've applied no-team scripts\n")
+	} else {
+		logFn("[+] applied no-team scripts\n")
+	}
+
+	return noTeamScripts, nil
 }
 
 func (c *Client) doGitOpsNoTeamSoftware(config *spec.GitOps, baseDir string, appconfig *fleet.EnrichedAppConfig, logFn func(format string, args ...interface{}), dryRun bool) ([]fleet.SoftwarePackageResponse, error) {
