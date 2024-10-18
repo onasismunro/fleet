@@ -27,6 +27,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/theupdateframework/go-tuf/client"
 	"github.com/theupdateframework/go-tuf/data"
+	"github.com/theupdateframework/go-tuf/verify"
 )
 
 const (
@@ -204,6 +205,17 @@ func (u *Updater) UpdateMetadata() error {
 		return fmt.Errorf("update metadata: %w", err)
 	}
 	return nil
+}
+
+func IsExpiredErr(err error) bool {
+	var errDecodeFailed client.ErrDecodeFailed
+	if errors.As(err, &errDecodeFailed) {
+		var errExpired verify.ErrExpired
+		if errors.As(errDecodeFailed.Err, &errExpired) {
+			return true
+		}
+	}
+	return false
 }
 
 // repoPath returns the path of the target in the remote repository.

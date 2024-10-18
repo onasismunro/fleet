@@ -23,6 +23,7 @@ import (
 	"github.com/fleetdm/fleet/v4/pkg/secure"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/theupdateframework/go-tuf/verify"
 	"github.com/urfave/cli/v2"
 )
 
@@ -455,4 +456,144 @@ func TestRollback(t *testing.T) {
 	require.NoError(t, err)
 	roots := getRoots(t, tmpDir)
 	assert.Equal(t, initialRoots, roots)
+}
+
+func TestIntegrationsUpdatesExpiredSignatures(t *testing.T) {
+	// Not t.Parallel() due to modifications to environment.
+
+	setPassphrases(t)
+
+	// Initialize a TUF repository where the root signature expires in 10 seconds.
+	for _, tc := range []struct {
+		name                      string
+		overrideKeyExpirationFunc func(t *testing.T)
+		updateMetadataFails       bool
+		lookupFails               bool
+		lookupErrorCheckFunc      func(t *testing.T, err error)
+	}{
+		{
+			name: "root expired",
+			overrideKeyExpirationFunc: func(t *testing.T) {
+				oldKeyExpirationDuration := keyExpirationDuration
+				t.Cleanup(func() {
+					keyExpirationDuration = oldKeyExpirationDuration
+				})
+				keyExpirationDuration = 5 * time.Second
+			},
+			// When the root signature is expired both UpdateMetadata fails and Lookup fail.
+			updateMetadataFails: true,
+			lookupFails:         true,
+			lookupErrorCheckFunc: func(t *testing.T, err error) {
+				var errExpired verify.ErrExpired
+				require.ErrorAs(t, err, &errExpired)
+			},
+		},
+		{
+			name: "snapshot expired",
+			overrideKeyExpirationFunc: func(t *testing.T) {
+				oldKeyExpirationDuration := snapshotExpirationDuration
+				t.Cleanup(func() {
+					snapshotExpirationDuration = oldKeyExpirationDuration
+				})
+				snapshotExpirationDuration = 5 * time.Second
+			},
+			// When the snapshot signature is expired UpdateMetadata does not fail and Lookup does fail.
+			updateMetadataFails: false,
+			lookupFails:         true,
+			lookupErrorCheckFunc: func(t *testing.T, err error) {
+				require.True(t, update.IsExpiredErr(err))
+			},
+		},
+		{
+			name: "targets expired",
+			overrideKeyExpirationFunc: func(t *testing.T) {
+				oldKeyExpirationDuration := targetsExpirationDuration
+				t.Cleanup(func() {
+					targetsExpirationDuration = oldKeyExpirationDuration
+				})
+				targetsExpirationDuration = 5 * time.Second
+			},
+			// When the targets signature is expired UpdateMetadata does not fail and Lookup does fail.
+			updateMetadataFails: false,
+			lookupFails:         true,
+			lookupErrorCheckFunc: func(t *testing.T, err error) {
+				require.True(t, update.IsExpiredErr(err))
+			},
+		},
+		{
+			name: "timestamp expired",
+			overrideKeyExpirationFunc: func(t *testing.T) {
+				oldKeyExpirationDuration := timestampExpirationDuration
+				t.Cleanup(func() {
+					timestampExpirationDuration = oldKeyExpirationDuration
+				})
+				timestampExpirationDuration = 5 * time.Second
+			},
+			// When the timestamp signature is expired UpdateMetadata fails and Lookup does not fail.
+			updateMetadataFails: true,
+			lookupFails:         false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.overrideKeyExpirationFunc(t)
+
+			tmpDir := t.TempDir()
+			err := runUpdatesCommand("init", "--path", tmpDir)
+			require.NoError(t, err)
+
+			roots := getRoots(t, tmpDir)
+
+			// Use the current binary as target for this test so that it is a binary that
+			// is valid for execution on the current system.
+			testPath, err := os.Executable()
+			require.NoError(t, err)
+			// Add a dummy target
+			require.NoError(t, runUpdatesCommand("add", "--path", tmpDir, "--target", testPath, "--platform", "macos", "--name", "test", "--version", "1.3.3.7"))
+			assertFileExists(t, filepath.Join(tmpDir, "repository", "targets", "test", "macos", "1.3.3.7", "test"))
+
+			// Run an HTTP server to serve the update metadata
+			server := httptest.NewServer(http.FileServer(http.Dir(filepath.Join(tmpDir, "repository"))))
+			t.Cleanup(server.Close)
+
+			// Initialize an update client
+			localStore, err := filestore.New(filepath.Join(tmpDir, "tuf-metadata.json"))
+			require.NoError(t, err)
+			updater, err := update.NewUpdater(update.Options{
+				RootDirectory: tmpDir,
+				ServerURL:     server.URL,
+				RootKeys:      roots,
+				LocalStore:    localStore,
+				Targets: update.Targets{
+					"test": update.TargetInfo{
+						Platform:   "macos",
+						Channel:    "1.3.3.7",
+						TargetFile: "test",
+					},
+				},
+			})
+			require.NoError(t, err)
+			err = updater.UpdateMetadata()
+			require.NoError(t, err)
+
+			time.Sleep(6 * time.Second)
+
+			// Expect UpdateMetadata to fail when the signature has expired.
+			err = updater.UpdateMetadata()
+			if tc.updateMetadataFails {
+				require.Error(t, err)
+				require.True(t, update.IsExpiredErr(err))
+			} else {
+				require.NoError(t, err)
+			}
+
+			// Expect Lookup to fail when the signature has expired.
+			_, err = updater.Lookup("test")
+			if tc.lookupFails {
+				require.Error(t, err)
+				tc.lookupErrorCheckFunc(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }

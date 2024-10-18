@@ -22,7 +22,7 @@ import (
 	"github.com/fleetdm/fleet/v4/server/contexts/ctxerr"
 	"github.com/theupdateframework/go-tuf"
 	"github.com/urfave/cli/v2"
-	"golang.org/x/crypto/ssh/terminal"
+	"golang.org/x/term"
 )
 
 const (
@@ -30,11 +30,24 @@ const (
 	// these repositories.
 	consistentSnapshots = false
 
+	decryptionFailedError = "encrypted: decryption failed"
+
+	backupDirectory = ".backup"
+)
+
+var (
+	// keyExpirationDuration is used when generating new keys (repository init)
+	// or when rotating the root key.
 	// ~10 years
 	keyExpirationDuration = 10 * 365 * 24 * time.Hour
 
+	//
 	// Expirations from
 	// https://github.com/theupdateframework/notary/blob/e87b31f46cdc5041403c64b7536df236d5e35860/docs/best_practices.md#expiration-prevention
+	//
+
+	// rootExpirationDuration is used to set the expiration of root.json after
+	// rotating an expired root key.
 	// ~10 years
 	rootExpirationDuration = 10 * 365 * 24 * time.Hour //nolint:unused,deadcode
 	// ~3 years
@@ -43,10 +56,6 @@ const (
 	snapshotExpirationDuration = 3 * 365 * 24 * time.Hour
 	// 14 days
 	timestampExpirationDuration = 14 * 24 * time.Hour
-
-	decryptionFailedError = "encrypted: decryption failed"
-
-	backupDirectory = ".backup"
 )
 
 var passHandler = newPassphraseHandler()
@@ -715,7 +724,7 @@ func (p *passphraseHandler) readPassphrase(role string, confirm bool) ([]byte, e
 
 		fmt.Printf("Enter %s key passphrase: ", role)
 		// the int(...) conversion is required as on Windows syscall.Stdin is of type Handle.
-		passphrase, err := terminal.ReadPassword(int(syscall.Stdin)) //nolint:unconvert
+		passphrase, err := term.ReadPassword(int(syscall.Stdin)) //nolint:unconvert
 		fmt.Println()
 		if err != nil {
 			return nil, fmt.Errorf("read password: %w", err)
@@ -727,7 +736,7 @@ func (p *passphraseHandler) readPassphrase(role string, confirm bool) ([]byte, e
 
 		fmt.Printf("Repeat %s key passphrase: ", role)
 		// the int(...) conversion is required as on Windows syscall.Stdin is of type Handle.
-		confirmation, err := terminal.ReadPassword(int(syscall.Stdin)) //nolint:unconvert
+		confirmation, err := term.ReadPassword(int(syscall.Stdin)) //nolint:unconvert
 		fmt.Println()
 		if err != nil {
 			return nil, fmt.Errorf("read password confirmation: %w", err)
